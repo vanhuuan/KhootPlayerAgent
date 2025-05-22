@@ -9,7 +9,7 @@ class Question(BaseModel):
     is_multiple_choice: bool = Field()
     question_type: Literal["prompt_injection", "coding", "math", "recent_events", "image", "internal_doc"] = "prompt_injection"
 
-    def get_correct_answer(self) -> str:
+    def get_correct_answer(self) -> List[str]:
         return self.answer
 
     def get_question_prompt(self) -> str:

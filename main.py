@@ -35,11 +35,10 @@ async def main():
 
         khoot_game = Khoot(pin=khoot_pin, username=nick_name)
 
-        question = await get_question(llm, context)
-
         has_next = True
 
         while has_next:
+            question = await get_question(llm, context)
 
             khoot_game.questions.append(question)
 

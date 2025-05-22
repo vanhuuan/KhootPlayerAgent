@@ -1,6 +1,4 @@
-from dataclasses import Field
-
-from anthropic import BaseModel
+from pydantic import BaseModel, Field
 from browser_use.agent.service import Agent
 from browser_use.controller.service import Controller
 from langchain_core.output_parsers import PydanticOutputParser
@@ -42,6 +40,7 @@ async def get_question(llm, context):
              - Image questions (image)
              - Questions on internal document (internal_doc)
          If no choice are provide, it's a text enter question, leave choices empty.
+         You do not answer or click the answer button at this step.
             """,
         llm=llm,
         browser_context=context,
@@ -116,8 +115,7 @@ async def get_answer(question: Question):
 async def enter_answer(question: Question, llm, context):
     controller = Controller(output_model=HasNext)
     enterAgent = Agent(
-        task=f"""You are in a Khoot Game. Your mission is enter this answer: {question.answer} . 
-                If it not exist, enter the answer you think is correct.
+        task=f"""You are in a Khoot Game. Your mission is enter this answer: {question.answer}.
                 After submit the answer, wait for result then wait until next question to show up each 3 seconds.
                 Finally, return True if has next question, else return False.
                 """,
@@ -139,4 +137,4 @@ async def enter_answer(question: Question, llm, context):
 
 
 class HasNext(BaseModel):
-    HasNext: bool = Field()
+    HasNext: bool = Field(True)
