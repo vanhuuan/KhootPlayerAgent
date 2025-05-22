@@ -2,6 +2,7 @@ from browser_use.agent.service import Agent
 from browser_use.controller.service import Controller
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from output_format.answer import AnswerData
 from output_format.question import Question
@@ -57,17 +58,11 @@ async def get_question(llm, context):
 
     return question
 
-def select_gemini_model(category: str) -> ChatGoogleGenerativeAI:
-    category = category.lower()
-    if category in ["encoded", "prompt injection", "coding", "math", "image"]:
-        # return "gemini-2.5-pro"
-        return ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite")
-    elif category == "recent events":
-        return ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-    elif category == "internal document":
-        return ChatGoogleGenerativeAI(model="gemini-1.5-pro")
-    else:
-        return ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite")
+def get_llmM_model() -> ChatOpenAI:
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.0,
+    )
 
 def get_prompt(category: str) -> str:
     match category.lower():
@@ -95,7 +90,7 @@ def get_prompt(category: str) -> str:
 
 async def get_answer(question: Question):
     parser = PydanticOutputParser(pydantic_object=AnswerData)
-    llm = select_gemini_model(question.question_type)
+    llm = get_llmM_model()
 
     prompt = get_prompt(question.question_type)
     format_prompt = f"""
