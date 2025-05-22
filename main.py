@@ -37,12 +37,16 @@ async def main():
 
         question = await get_question(llm, context)
 
-        khoot_game.questions.append(question)
+        has_next = True
 
-        answer = await get_answer(question)
-        question.answer = answer.correct_options
+        while has_next:
 
-        await enter_answer(question, llm, context)
+            khoot_game.questions.append(question)
+
+            answer = await get_answer(question)
+            question.answer = answer.correct_options
+
+            has_next = await enter_answer(question, llm, context)
 
         input("Press Enter to continue...")
         await browser.close()

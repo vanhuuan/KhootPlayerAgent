@@ -1,3 +1,6 @@
+from dataclasses import Field
+
+from anthropic import BaseModel
 from browser_use.agent.service import Agent
 from browser_use.controller.service import Controller
 from langchain_core.output_parsers import PydanticOutputParser
@@ -111,15 +114,29 @@ async def get_answer(question: Question):
     return output_data
 
 async def enter_answer(question: Question, llm, context):
+    controller = Controller(output_model=HasNext)
     enterAgent = Agent(
         task=f"""You are in a Khoot Game. Your mission is enter this answer: {question.answer} . 
                 If it not exist, enter the answer you think is correct.
                 After submit the answer, wait for result then wait until next question to show up each 3 seconds.
+                Finally, return True if has next question, else return False.
                 """,
         llm=llm,
         browser_context=context,
         use_vision=False,
         save_conversation_path="logs/enter_answer",
+        controller=controller
     )
 
-    await enterAgent.run()
+    result = await enterAgent.run()
+    hasNextRs = result.final_result()
+
+    if hasNextRs:
+        parsed: HasNext = HasNext.model_validate_json(hasNextRs)
+        return parsed.HasNext
+    else:
+        return False
+
+
+class HasNext(BaseModel):
+    HasNext: bool = Field()
