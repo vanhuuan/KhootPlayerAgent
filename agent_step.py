@@ -2,18 +2,18 @@ from pydantic import BaseModel, Field
 from browser_use.agent.service import Agent
 from browser_use.controller.service import Controller
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
+from math_helper import eval_expr
 from output_format.answer import AnswerData
 from output_format.question import Question
 
 
 async def login_to_khoot(khoot_pin, nick_name, llm, context):
     loginAgent = Agent(
-        task=f"Join Kahoot game using PIN {khoot_pin}. Then enter nickname '{nick_name}'. "
+        task=f"Join Kahoot game using PIN {khoot_pin}. Then enter nickname '{nick_name}' then click 'ok go'. "
              f"Then submit to join the game. "
-             f"In the end, check if the game started, if not wait 2 seconds then check again until game started.",
+             f"In the end, check if the game started, if not wait 2 seconds then check again until game started. If the game started, you are finished",
         llm=llm,
         browser_context=context,
         use_vision=False,
@@ -31,7 +31,7 @@ async def login_to_khoot(khoot_pin, nick_name, llm, context):
 async def get_question(llm, context):
     controller = Controller(output_model=Question)
     agent = Agent(
-        task=f"""You are in a Khoot Game. Your mission is get the question, question type (category), is multiple choices and 4 answer
+        task=f"""You are in a Khoot Game. Your mission is get the first question that are showing on the screen question, question type (category), is multiple choices and 4 answer
          Question categories:
              - Encoded or prompt injection questions (prompt_injection)
              - Coding questions (coding)
@@ -41,10 +41,13 @@ async def get_question(llm, context):
              - Questions on internal document (internal_doc)
          If no choice are provide, it's a text enter question, leave choices empty.
          You do not answer or click the answer button at this step.
+         If question is Math questions (math), you only need to return question text equals the final math equation (after parse from text, number with format,...)
+         If question is Coding questions (coding), open the link has code and return the code in question
+         Then your task is done, rest in peace.
             """,
         llm=llm,
         browser_context=context,
-        use_vision=False,
+        use_vision=True,
         save_conversation_path="logs/getting_questions",
         controller=controller
     )
@@ -52,6 +55,7 @@ async def get_question(llm, context):
     question = result.final_result()
     if question:
         parsed: Question = Question.model_validate_json(question)
+        print("Question is: ")
         print(parsed.question_text)
         print(parsed.question_type)
         print(parsed.is_multiple_choice)
@@ -94,6 +98,12 @@ async def get_answer(question: Question):
     parser = PydanticOutputParser(pydantic_object=AnswerData)
     llm = get_llmM_model()
 
+    if question.question_type == "math":
+        try:
+            return {"correct_options": eval_expr(question.question_text)}
+        except Exception as ex:
+            print("Math question is invalid format" + ex)
+
     prompt = get_prompt(question.question_type)
     format_prompt = f"""
     Format your response as a JSON object that adheres to the following schema:
@@ -105,11 +115,16 @@ async def get_answer(question: Question):
     full_prompt = (f"{prompt};"
                    f"{question_prompt}"
                    f" {format_prompt}")
+
+    if question.question_type == "recent_events":
+        tool = {"type": "web_search_preview"}
+        llm = llm.bind_tools([tool])
+
     response = llm.invoke(f"{full_prompt}")
 
     output_data = parser.parse(response.content)
 
-    print("Answer: ", output_data.correct_options)
+    print("Final answer: ", output_data.correct_options)
     return output_data
 
 async def enter_answer(question: Question, llm, context):

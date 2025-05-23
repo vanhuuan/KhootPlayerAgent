@@ -38,13 +38,15 @@ async def main():
         has_next = True
 
         while has_next:
+            print("Getting question")
             question = await get_question(llm, context)
-
             khoot_game.questions.append(question)
 
+            print("Getting answer")
             answer = await get_answer(question)
             question.answer = answer.correct_options
 
+            print("Enter answer")
             has_next = await enter_answer(question, llm, context)
 
         input("Press Enter to continue...")
