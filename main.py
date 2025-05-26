@@ -2,8 +2,10 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from langchain_core.output_parsers import PydanticOutputParser
 
 from agent_step import login_to_khoot, get_question, get_answer, enter_answer
+from output_format.answer import AnswerData
 from output_format.question import Question, Khoot
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,7 +26,6 @@ async def main():
             model="gpt-4o-mini",
             temperature=0.0,
         )
-
 
         khoot_pin = input("Enter Kahoot PIN: ").strip()
 
@@ -51,7 +52,6 @@ async def main():
 
         input("Press Enter to continue...")
         await browser.close()
-
 
 asyncio.run(main())
 

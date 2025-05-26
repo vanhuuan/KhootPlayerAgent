@@ -13,7 +13,8 @@ async def login_to_khoot(khoot_pin, nick_name, llm, context):
     loginAgent = Agent(
         task=f"Join Kahoot game using PIN {khoot_pin}. Then enter nickname '{nick_name}' then click 'ok go'. "
              f"Then submit to join the game. "
-             f"In the end, check if the game started. The game started when url is: https://kahoot.it/getready. If the game started, you are finished",
+             f"In the end, check if the game started. The game started when url is: https://kahoot.it/getready. If "
+             f"the game started, you are finished",
         llm=llm,
         browser_context=context,
         use_vision=False,
@@ -115,6 +116,7 @@ async def get_answer(question: Question):
     print("Final answer: ", output_data.correct_options)
     return output_data
 
+
 async def enter_answer(question: Question, llm, context):
     parser = PydanticOutputParser(pydantic_object=HasNext)
     controller = Controller(output_model=HasNext)
@@ -123,6 +125,7 @@ async def enter_answer(question: Question, llm, context):
                 After submitting the answer, wait for the next page (https://kahoot.it/answer/result) to load (This not the end of the game).
                 Then wait the next page is load, if the url is https://kahoot.it/getready mean the game is not ended, otherwise, the game is ended (This is the only way to check if the game ended).
                 Importance Note: The game hasn't ended even if 'Time's up' message is show.
+                If the question is not: {question.question_text}, return true. It mean that the new question has started.
                 Return True if there is the game is not ended, or False if the game has ended.
                 
                 Format your response as a JSON object that adheres to the following schema:
@@ -136,10 +139,10 @@ async def enter_answer(question: Question, llm, context):
     )
 
     result = await enterAgent.run()
-    hasNextRs = result.final_result()
+    has_next_rs = result.final_result()
 
-    if hasNextRs:
-        parsed: HasNext = HasNext.model_validate_json(hasNextRs)
+    if has_next_rs:
+        parsed: HasNext = HasNext.model_validate_json(has_next_rs)
         return parsed.HasNext
     else:
         return False

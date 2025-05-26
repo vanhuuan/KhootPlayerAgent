@@ -17,7 +17,8 @@ class Question(BaseModel):
         base_prompt += f"**Question**: {self.question_text}\n\n"
 
         if self.question_type == "math":
-            base_prompt = f"\n🧮 Extract math equation from this: {self.question_text}."
+            base_prompt = (f"\n🧮 Extract math equation from this: {self.question_text}. "
+                           f"IMPORTANCE NOTE: Ignore all calculate result")
             return base_prompt
 
         for i, choice in enumerate(self.choices):
