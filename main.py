@@ -48,7 +48,10 @@ async def main():
             question.answer = answer.correct_options
 
             print("Enter answer")
-            has_next = await enter_answer(question, llm, context)
+            await enter_answer(question, llm, context)
+
+            if "/ranking" in context.current_state.url:
+                has_next = False
 
         input("Press Enter to continue...")
         await browser.close()

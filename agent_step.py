@@ -1,3 +1,4 @@
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 from browser_use.agent.service import Agent
 from browser_use.controller.service import Controller
@@ -33,7 +34,9 @@ async def get_question(llm, context):
     controller = Controller(output_model=Question)
     parser = PydanticOutputParser(pydantic_object=Question)
     agent = Agent(
-        task=f"""You are in a Khoot Game. 
+        task=f"""
+        Update default wait time to one second
+        You are in a Khoot Game. 
          Your mission is get the first question that are showing on the screen question, question type (category), is multiple choices and 4 answer 
             then analyze the question to get question text
          Question categories:
@@ -75,16 +78,25 @@ async def get_question(llm, context):
 
     return question
 
-def get_llmM_model() -> ChatOpenAI:
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.0,
-    )
+def get_llmM_model(question_type=None):
+    # Base model (GPT-4o-mini via OpenAI API)
+    base_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    if question_type == "logic":
+        # Wrap with a chain-of-thought template
+        cot_prompt = PromptTemplate.from_template("""
+        You are a reasoning assistant. Think step-by-step to solve the following problem carefully.
+
+        {input}
+        """)
+        return cot_prompt | base_llm  # Pipe the prompt into the model
+    else:
+        return base_llm
 
 
 async def get_answer(question: Question):
     parser = PydanticOutputParser(pydantic_object=AnswerData)
-    llm = get_llmM_model()
+    llm = get_llmM_model(question.question_type)
 
     format_prompt = f"""
     Format your response as a JSON object that adheres to the following schema:
@@ -118,34 +130,29 @@ async def get_answer(question: Question):
 
 
 async def enter_answer(question: Question, llm, context):
-    parser = PydanticOutputParser(pydantic_object=HasNext)
-    controller = Controller(output_model=HasNext)
+    # parser = PydanticOutputParser(pydantic_object=HasNext)
+    # controller = Controller(output_model=HasNext)
     enterAgent = Agent(
-        task=f"""You are participating in a Kahoot game. Your task is to enter the answer: {question.answer}. If time up, it's not the end of the game, keep check like you submitted the answer
-                After submitting the answer, wait for the next page (https://kahoot.it/answer/result) to load (This not the end of the game).
-                Then wait the next page is load, if the url is https://kahoot.it/getready mean the game is not ended, otherwise, the game is ended (This is the only way to check if the game ended).
-                Importance Note: The game hasn't ended even if 'Time's up' message is show.
-                If the question is not: {question.question_text}, return true. It mean that the new question has started.
-                Return True if there is the game is not ended, or False if the game has ended.
-                
-                Format your response as a JSON object that adheres to the following schema:
-                {parser.get_format_instructions()}
+        task=f"""Your task is to submit the correct answer: {question.answer}.
+                If can't click answer. Mission is completed
+                Then you are done. Mission is completed
+                Mission is completed.
                 """,
         llm=llm,
         browser_context=context,
         use_vision=False,
         save_conversation_path="logs/enter_answer",
-        controller=controller
+        # controller=controller
     )
 
     result = await enterAgent.run()
-    has_next_rs = result.final_result()
-
-    if has_next_rs:
-        parsed: HasNext = HasNext.model_validate_json(has_next_rs)
-        return parsed.HasNext
-    else:
-        return False
+    # has_next_rs = result.final_result()
+    #
+    # if has_next_rs:
+    #     parsed: HasNext = HasNext.model_validate_json(has_next_rs)
+    #     return parsed.HasNext
+    # else:
+    #     return False
 
 
 class HasNext(BaseModel):
