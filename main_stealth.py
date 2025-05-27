@@ -3,14 +3,26 @@ import sys
 import time
 from dotenv import load_dotenv
 from output_format.question import Khoot
-from selenium_agent import SeleniumKahootAgent
 from output_format.answer import AnswerData
+
+# Try to import both agents
+try:
+    from selenium_agent_stealth import StealthKahootAgent
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+    print("Stealth agent not available, install undetected-chromedriver")
+
+from selenium_agent import SeleniumKahootAgent
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 load_dotenv()
 
 def main():
+    print("Kahoot AI Agent - Stealth Mode")
+    print("=" * 40)
+    
     # Get game PIN and nickname from environment variables or input
     pin = os.getenv("KAHOOT_PIN")
     nickname = os.getenv("KAHOOT_NICKNAME", "AI_Player")
@@ -19,7 +31,7 @@ def main():
         pin = input("Enter Kahoot Game PIN: ")
     
     # Initialize Selenium agent
-    agent = SeleniumKahootAgent()
+    agent = StealthKahootAgent()
     
     try:
         # Setup driver and login to Kahoot
@@ -46,7 +58,7 @@ def main():
             question = agent.get_question_data()
             
             # Use early-prepared answer if available
-            if agent.early_answer and len(agent.early_answer) > 0:
+            if hasattr(agent, 'early_answer') and agent.early_answer and len(agent.early_answer) > 0:
                 print(f"Using early-prepared answer: {agent.early_answer}")
                 question.answer = agent.early_answer
                 agent.early_answer = None  # Reset for next question
@@ -63,6 +75,18 @@ def main():
             # Sleep to prevent immediate check for next question
             time.sleep(2)
             
+        print(f"\nGame completed! Answered {len(khoot_game.questions)} questions.")
+        
+        # Show summary
+        if khoot_game.questions:
+            print("\n--- Game Summary ---")
+            for i, q in enumerate(khoot_game.questions, 1):
+                print(f"Q{i}: {q.question_text[:50]}...")
+                print(f"     Answer: {q.answer}")
+                print(f"     Type: {q.question_type}")
+        
+        input("Press Enter to close browser...")
+        
     except Exception as e:
         print(f"Error in main loop: {e}")
     finally:
@@ -70,6 +94,4 @@ def main():
         agent.close()
 
 if __name__ == "__main__":
-    main()
-
-
+    main() 

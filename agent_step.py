@@ -78,8 +78,8 @@ async def get_question(llm, context):
 
     return question
 
-def get_llmM_model(question_type=None):
-    # Base model (GPT-4o-mini via OpenAI API)
+def get_llm_model(question_type=None):
+    """Get appropriate LLM model based on question type"""
     base_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
     if question_type == "logic":
@@ -89,18 +89,52 @@ def get_llmM_model(question_type=None):
 
         {input}
         """)
-        return cot_prompt | base_llm  # Pipe the prompt into the model
+        return cot_prompt | base_llm
+    elif question_type == "coding":
+        # Enhanced prompt for coding questions
+        coding_prompt = PromptTemplate.from_template("""
+        You are a programming expert. Analyze the following code question carefully.
+        Consider the code structure, syntax, logic, and expected output.
+        All answers should be in lowercase for case-insensitive matching.
+
+        {input}
+        """)
+        return coding_prompt | base_llm
+    elif question_type == "encoded":
+        # Enhanced prompt for encoded questions
+        encoded_prompt = PromptTemplate.from_template("""
+        You are analyzing a question that was previously encoded (Base64, URL encoding, etc.).
+        The question has been decoded for you. Focus on the decoded content to provide the correct answer.
+        All answers should be in lowercase for case-insensitive matching.
+
+        {input}
+        """)
+        return encoded_prompt | base_llm
     else:
         return base_llm
 
 
 async def get_answer(question: Question):
     parser = PydanticOutputParser(pydantic_object=AnswerData)
-    llm = get_llmM_model(question.question_type)
+    
+    # Convert question text and choices to lowercase for case insensitive handling
+    question.question_text = question.question_text.lower()
+    question.choices = [choice.lower() for choice in question.choices]
+    
+    # Handle encoded questions - decode them first
+    if question.question_type == "encoded" and question.decoded_text:
+        # Use the decoded text for AI processing
+        original_text = question.question_text
+        question.question_text = question.decoded_text.lower()
+        print(f"🔐 Using decoded text for AI: {question.decoded_text}")
+    
+    llm = get_llm_model(question.question_type)
 
     format_prompt = f"""
     Format your response as a JSON object that adheres to the following schema:
     {parser.get_format_instructions()}
+    
+    IMPORTANT: All answers must be in lowercase for case-insensitive matching.
     """
 
     question_prompt = question.get_question_prompt()
@@ -111,6 +145,12 @@ async def get_answer(question: Question):
     if question.question_type == "recent_events":
         tool = {"type": "web_search_preview"}
         llm = llm.bind_tools([tool])
+    elif question.question_type == "coding":
+        # Add specific instructions for coding questions
+        full_prompt += "\n\nFor coding questions: Analyze the code structure, syntax, and logic. Consider what the code does, its output, or any errors it might have."
+    elif question.question_type == "encoded":
+        # Add specific instructions for encoded questions
+        full_prompt += "\n\nFor encoded questions: The question has been decoded for you. Answer based on the decoded content."
 
     print("Getting answer prompt:", full_prompt)
 
@@ -124,6 +164,9 @@ async def get_answer(question: Question):
             output_data.correct_options[0] = eval_expr(output_data.correct_options[0])
         except Exception as ex:
             print("Math question is invalid format" + ex.__str__())
+    
+    # Ensure all answers are lowercase
+    output_data.correct_options = [str(option).lower() for option in output_data.correct_options]
 
     print("Final answer: ", output_data.correct_options)
     return output_data
