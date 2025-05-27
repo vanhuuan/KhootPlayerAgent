@@ -590,7 +590,7 @@ class SeleniumKahootAgent:
             try:
                 if question.question_type == "image" and question.image_data:
                     response = self._get_vision_answer(question, full_prompt)
-                elif question.question_type == "internal_doc" or question.question_type == "recent_events":
+                elif question.question_type == "internal_doc":
                     results = self.retrieve(question.question_text)
 
                     print("\n[RESULTS] Retrieved Chunks and Distances:")
@@ -944,6 +944,18 @@ class SeleniumKahootAgent:
         except:
             return False
             
+    def _should_skip_question(self, question_text):
+        """Check if the question should be skipped based on its starting text"""
+        skip_phrases = ["solid effort", "genius machine"]
+        question_lower = question_text.lower().strip()
+        
+        for phrase in skip_phrases:
+            if question_lower.startswith(phrase):
+                print(f"⏭️ Skipping question that starts with '{phrase}'")
+                return True
+        
+        return False
+
     def wait_for_next_question(self):
         """Wait for the next question to appear and prepare answer if possible"""
         try:
@@ -971,10 +983,16 @@ class SeleniumKahootAgent:
                     
                     # First check if an active question is already visible
                     try:
-                        # If a question with answer options is already visible, return immediately
+                        # If a question with answer options is already visible, check if we should skip it
                         if self._check_for_active_question(current_url, []):
-                            print("Full question with answer options already visible")
-                            return
+                            question_text = self._extract_question_text()
+                            if question_text and self._should_skip_question(question_text):
+                                print("Question should be skipped - waiting for next question...")
+                                time.sleep(2)  # Wait and continue checking
+                                continue
+                            else:
+                                print("Full question with answer options already visible")
+                                return
                     except Exception as active_question_error:
                         print(f"Error checking for active question: {active_question_error}")
                     
@@ -987,6 +1005,12 @@ class SeleniumKahootAgent:
                     try:
                         page_text = self.driver.page_source.lower()
                         page_title = self._extract_potential_question_title()
+                        
+                        # Check if we should skip the upcoming question
+                        if page_title and self._should_skip_question(page_title):
+                            print(f"Upcoming question should be skipped - waiting for next question...")
+                            time.sleep(2)
+                            continue
                         
                         # Try to prepare early answer if we're on the "get ready" page
                         # AND no answer buttons are visible yet
@@ -1009,8 +1033,15 @@ class SeleniumKahootAgent:
                         
                         # If answer buttons are visible, we're on the actual question
                         if answer_buttons_visible:
-                            print("Answer buttons visible - question is ready")
-                            return
+                            # Check if we should skip this question
+                            question_text = self._extract_question_text()
+                            if question_text and self._should_skip_question(question_text):
+                                print("Question should be skipped - waiting for next question...")
+                                time.sleep(2)  # Wait and continue checking
+                                continue
+                            else:
+                                print("Answer buttons visible - question is ready")
+                                return
                         
                         # Check for lobby/waiting messages (not questions)
                         lobby_indicators = [
@@ -1030,8 +1061,15 @@ class SeleniumKahootAgent:
                     # Check for question indicators one more time
                     try:
                         if self._check_for_active_question(current_url, lobby_indicators):
-                            time.sleep(1)  # Brief wait for content to load
-                            return
+                            # Check if we should skip this question
+                            question_text = self._extract_question_text()
+                            if question_text and self._should_skip_question(question_text):
+                                print("Question should be skipped - waiting for next question...")
+                                time.sleep(2)  # Wait and continue checking
+                                continue
+                            else:
+                                time.sleep(1)  # Brief wait for content to load
+                                return
                     except Exception as check_error:
                         print(f"Error in final check for active question: {check_error}")
                     
