@@ -299,13 +299,11 @@ Guidelines:
     ]
 
     try:
-        tool = {"type": "web_search_preview"}
         response = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
             temperature=0.1,
-            max_tokens=1000,
-            tools=[tool]
+            max_tokens=1000
         )
         print("[CHAT] Received response from chat model.")
         return response.choices[0].message.content
