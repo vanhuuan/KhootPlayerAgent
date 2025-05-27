@@ -1,3 +1,4 @@
+import os
 import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -14,14 +15,61 @@ from output_format.answer import AnswerData
 from math_helper import eval_expr
 from encoding_helper import handle_encoded_question
 import re
+import numpy as np
+import pickle
+import faiss
+import openai
+import argparse
+from openai import OpenAI
 
+INDEX_PATH = "faiss.index"
+CHUNKS_PATH = "chunks.pkl"
+TOP_K = 5
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class SeleniumKahootAgent:
     def __init__(self):
         self.driver = None
         self.wait = None
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+        self.client = OpenAI(api_key=OPENAI_API_KEY)
         self.early_answer = None  # Add this to store early answer
+        self.index = faiss.read_index(INDEX_PATH)
+        with open(CHUNKS_PATH, 'rb') as f:
+            self.chunks = pickle.load(f)
+
+    def get_embedding(self, text):
+        resp = openai.embeddings.create(
+            model="text-embedding-3-large",
+            input=[text]
+        )
+        return np.array(resp.data[0].embedding, dtype='float32')
+
+    def retrieve(self, query, k=TOP_K):
+        print(f"[RETRIEVE] Query: {query}")
+        q_emb = self.get_embedding(query).reshape(1, -1)
+        D, I = self.index.search(q_emb, k)
+        results = []
+        for idx, dist in zip(I[0], D[0]):
+            results.append((self.chunks[idx], float(dist)))
+        return results
+
+    def chat_with_context(self, query, top_chunks):
+        context = "\n\n---\n\n".join([c for c, _ in top_chunks])
+        prompt = (
+            "You are an expert assistant. Use the provided context to answer the question.\n\n"
+            f"Context:\n{context}\n\nQuestion: {query}"
+        )
+        resp = self.client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {"role": "system", "content": "You are an expert assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2
+        )
+        print(resp.choices[0].message)
+        return resp.choices[0].message
         
     def setup_driver(self):
         """Initialize Chrome driver with appropriate options"""
@@ -67,7 +115,7 @@ class SeleniumKahootAgent:
         
     def login_to_kahoot(self, pin: str, nickname: str):
         """Login to Kahoot game"""
-        max_retries = 3
+        max_retries = 5
         retry_count = 0
         
         while retry_count < max_retries:
@@ -236,6 +284,8 @@ class SeleniumKahootAgent:
             question_text = self._extract_question_text()
             if not question_text:
                 raise Exception("Could not find question text")
+
+            question_text = self._extract_code_from_url(question_text)
             
             # Convert question text to lowercase
             question_text = question_text.lower()
@@ -247,12 +297,10 @@ class SeleniumKahootAgent:
             formatted_choices = []
             for i, choice in enumerate(choices):
                 formatted_choices.append(f"Option {i+1}: {choice}")
-
-            question_text = self._extract_code_from_url(question_text)
             
             # Determine question type based on content
             question_type = self._classify_question(question_text, choices)
-            
+
             # Handle encoded questions
             decoded_text = None
             if question_type == "encoded":
@@ -462,7 +510,7 @@ class SeleniumKahootAgent:
             - math: mathematical calculations or equations
             - recent_events: questions about current events or recent happenings
             - image: questions referring to visual elements
-            - internal_doc: questions referring to internal documentation
+            - internal_doc: questions referring to internal information of a company or organization or about Tech Contest, Company Trip, Contest Format, OoO Relay Event, Year end party, Learning and Organizational Development 
             - logic: general knowledge or logical reasoning questions
             - encoded: questions with encoded text (base64, ROT13, etc.)
             
@@ -532,18 +580,36 @@ class SeleniumKahootAgent:
             
             question_prompt = question.get_question_prompt()
             full_prompt = f"{question_prompt}\n{format_prompt}"
-            
+
+            print("AI Prompt:", full_prompt)
+
             # Select appropriate LLM based on question type
             llm = self._get_specialized_llm(question.question_type)
             
             # Handle image questions with vision model
-            if question.question_type == "image" and question.image_data:
-                response = self._get_vision_answer(question, full_prompt)
-            else:
-                # Call the specialized LLM function directly
-                response = llm(full_prompt)
-            
-            output_data = parser.parse(response.content)
+            try:
+                if question.question_type == "image" and question.image_data:
+                    response = self._get_vision_answer(question, full_prompt)
+                elif question.question_type == "internal_doc" or question.question_type == "recent_events":
+                    results = self.retrieve(question.question_text)
+
+                    print("\n[RESULTS] Retrieved Chunks and Distances:")
+                    for i, (chunk, dist) in enumerate(results, 1):
+                        print(f"-- Chunk {i} (dist={dist:.4f}):\n{chunk}\n")
+
+                    response = self.chat_with_context(full_prompt, results)
+                else:
+                    # Call the specialized LLM function directly
+                    response = llm(full_prompt)
+                
+                output_data = parser.parse(response.content)
+            except Exception as api_error:
+                print(f"Error calling AI or parsing response: {api_error}")
+                # Return a default answer to prevent crashes
+                return AnswerData(
+                    correct_options=["default_answer"],
+                    explanation="Error occurred while getting answer from AI"
+                )
             
             # Handle math questions
             if question.question_type == "math":
@@ -560,11 +626,14 @@ class SeleniumKahootAgent:
                 
                 # Extract just the number if it says "option X"
                 if "option" in option_str:
-                    import re
-                    # Try to extract just the number
-                    number_match = re.search(r'\d+', option_str)
-                    if number_match:
-                        option_str = number_match.group(0)
+                    try:
+                        import re
+                        # Try to extract just the number
+                        number_match = re.search(r'\d+', option_str)
+                        if number_match:
+                            option_str = number_match.group(0)
+                    except Exception as regex_error:
+                        print(f"Error extracting option number: {regex_error}")
                 
                 processed_options.append(option_str)
             
@@ -576,77 +645,105 @@ class SeleniumKahootAgent:
             
         except Exception as e:
             print(f"Error getting AI answer: {e}")
-            raise
-            
+            # Return a default answer to prevent crashes
+            return AnswerData(
+                correct_options=["default_answer"],
+                explanation="Error occurred while getting answer"
+            )
+
     def _get_specialized_llm(self, question_type, prompt=None):
         """Get appropriate LLM model based on question type"""
-        base_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-        
-        if question_type == "logic":
-            # Improved logic question prompt with better answer format instructions
-            cot_prompt = PromptTemplate.from_template("""
-            You are a reasoning assistant. Think step-by-step to solve the following problem carefully.
-            
-            IMPORTANT ANSWER FORMAT INSTRUCTIONS:
-            1. For multiple choice questions, provide ONLY the number or letter of the correct option.
-            2. Do NOT include the word "option" in your answer - just return "1", "2", "3", or "4".
-            3. If the answer is a specific value, provide only that value.
-            4. All answers must be in lowercase for case-insensitive matching.
-            
-            {input}
-            """)
-            # Return a callable that will format the prompt then call the LLM
-            return lambda p: base_llm.invoke(cot_prompt.format(input=p))
-            
-        elif question_type == "coding":
-            # Enhanced prompt for coding questions
-            coding_prompt = PromptTemplate.from_template("""
-            You are a programming expert. Analyze the following code question carefully.
-            Consider the code structure, syntax, logic, and expected output.
-            All answers should be in lowercase for case-insensitive matching.
+        try:
+            base_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
 
-            {input}
-            """)
-            return lambda p: base_llm.invoke(coding_prompt.format(input=p))
-            
-        elif question_type == "math":
-            # Enhanced prompt for math questions
-            math_prompt = PromptTemplate.from_template("""
-            You are a mathematics expert. Solve the following problem step-by-step.
-            Show your work and provide the exact numerical answer.
-            If the answer is a number, provide it directly without words.
-            All answers should be in lowercase for case-insensitive matching.
+            if question_type == "logic":
+                print('Use logic')
+                # Improved logic question prompt with better answer format instructions
+                try:
+                    cot_prompt = PromptTemplate.from_template("""
+                    You are a reasoning assistant. Think step-by-step to solve the following problem carefully.
+                    
+                    {input}
+                    """)
+                    # Return a callable that will format the prompt then call the LLM
+                    return lambda p: base_llm.invoke(cot_prompt.format(input=p))
+                except Exception as template_error:
+                    print(f"Error creating logic template: {template_error}")
+                    return base_llm
 
-            {input}
-            """)
-            return lambda p: base_llm.invoke(math_prompt.format(input=p))
-            
-        elif question_type == "encoded":
-            # Enhanced prompt for encoded questions
-            encoded_prompt = PromptTemplate.from_template("""
-            You are analyzing a question that was previously encoded (Base64, URL encoding, etc.).
-            The question has been decoded for you. Focus on the decoded content to provide the correct answer.
-            All answers should be in lowercase for case-insensitive matching.
+            elif question_type == "coding":
+                # Enhanced prompt for coding questions
+                try:
+                    coding_prompt = PromptTemplate.from_template("""
+                    You are a programming expert. Analyze the following code question carefully.
+                    Consider the code structure, syntax, logic, and expected output.
+                    All answers should be in lowercase for case-insensitive matching.
 
-            {input}
-            """)
-            return lambda p: base_llm.invoke(encoded_prompt.format(input=p))
-            
-        elif question_type == "recent_events":
-            # Enhanced prompt for recent events questions
-            events_prompt = PromptTemplate.from_template("""
-            You are a current events expert. Answer the following question about recent happenings.
-            Be factual and precise. If you're uncertain, indicate the most likely answer based on recent events.
-            All answers should be in lowercase for case-insensitive matching.
+                    {input}
+                    """)
+                    return lambda p: base_llm.invoke(coding_prompt.format(input=p))
+                except Exception as template_error:
+                    print(f"Error creating coding template: {template_error}")
+                    return base_llm
 
-            {input}
-            """)
-            return lambda p: base_llm.invoke(events_prompt.format(input=p))
-            
-        else:
-            # Default case - use base LLM directly
-            return base_llm
-            
+            elif question_type == "math":
+                # Enhanced prompt for math questions
+                try:
+                    math_prompt = PromptTemplate.from_template("""
+                    You are a mathematics expert. Solve the following problem step-by-step.
+                    Show your work and provide the exact numerical answer.
+                    If the answer is a number, provide it directly without words.
+                    All answers should be in lowercase for case-insensitive matching.
+
+                    {input}
+                    """)
+                    return lambda p: base_llm.invoke(math_prompt.format(input=p))
+                except Exception as template_error:
+                    print(f"Error creating math template: {template_error}")
+                    return base_llm
+
+            elif question_type == "encoded":
+                # Enhanced prompt for encoded questions
+                try:
+                    encoded_prompt = PromptTemplate.from_template("""
+                    You are analyzing a question that was previously encoded (Base64, URL encoding, etc.).
+                    The question has been decoded for you. Focus on the decoded content to provide the correct answer.
+                    All answers should be in lowercase for case-insensitive matching.
+
+                    {input}
+                    """)
+                    return lambda p: base_llm.invoke(encoded_prompt.format(input=p))
+                except Exception as template_error:
+                    print(f"Error creating encoded template: {template_error}")
+                    return base_llm
+
+            elif question_type == "recent_events":
+                # Enhanced prompt for recent events questions
+                try:
+                    events_prompt = PromptTemplate.from_template("""
+                    You are a current events expert. Answer the following question about recent happenings.
+                    Be factual and precise. If you're uncertain, indicate the most likely answer based on recent events.
+                    All answers should be in lowercase for case-insensitive matching.
+
+                    {input}
+                    """)
+                    return lambda p: base_llm.invoke(events_prompt.format(input=p))
+                except Exception as template_error:
+                    print(f"Error creating recent events template: {template_error}")
+                    return base_llm
+
+            else:
+                # Default case - use base LLM directly
+                return base_llm
+        except Exception as e:
+            print(f"Error in _get_specialized_llm: {e}")
+            # Create a default LLM as fallback
+            try:
+                return ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+            except:
+                # Last resort - create a wrapper function that returns a default answer
+                return lambda p: type('obj', (object,), {'content': '{"correct_options": ["default_answer"], "explanation": "LLM error"}'})
+
     def enter_answer(self, question: Question):
         """Enter the answer by clicking the appropriate choice"""
         try:
@@ -657,136 +754,154 @@ class SeleniumKahootAgent:
             print(f"Trying to click answer: {question.answer}")
             
             # Extract answer selectors if available in question text
-            answer_selectors = {}
-            selector_pattern = r'(\d+): (\[data-functional-selector=[\'"].*?[\'"]\]|//.*)'
-            question_text = question.question_text
-            
-            # Extract selectors from question text if present
-            selector_matches = re.findall(selector_pattern, question_text)
-            if selector_matches:
-                for index, selector in selector_matches:
-                    answer_selectors[int(index)] = selector
+            try:
+                answer_selectors = {}
+                selector_pattern = r'(\d+): (\[data-functional-selector=[\'"].*?[\'"]\]|//.*)'
+                question_text = question.question_text
+                
+                # Extract selectors from question text if present
+                selector_matches = re.findall(selector_pattern, question_text)
+                if selector_matches:
+                    for index, selector in selector_matches:
+                        answer_selectors[int(index)] = selector
+            except Exception as selector_error:
+                print(f"Error extracting answer selectors: {selector_error}")
+                answer_selectors = {}
             
             # Find and click the correct answer
             for answer in question.answer:
                 clicked = False
-                answer_lower = answer.lower()  # Convert to lowercase for comparison
-                
-                # STRATEGY 0: Find position of answer in choices (most accurate approach)
-                answer_position = self._find_answer_position(answer_lower, question.choices)
-                if answer_position is not None:
-                    print(f"Found answer '{answer_lower}' at position {answer_position}")
+                try:
+                    answer_lower = answer.lower()  # Convert to lowercase for comparison
+                    
+                    # STRATEGY 0: Find position of answer in choices (most accurate approach)
                     try:
-                        selector = f"[data-functional-selector='answer-{answer_position}']"
-                        answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                        if answer_button.is_displayed():
-                            answer_button.click()
-                            print(f"Clicked answer at position {answer_position} using selector: {selector}")
-                            clicked = True
-                            break
-                    except Exception as e:
-                        print(f"Error clicking position-based selector: {e}")
-                
-                if clicked:
-                    break
-                
-                # STRATEGY 1: Use Kahoot-specific selectors with answer index
-                if answer_lower.isdigit() and 0 <= int(answer_lower) < 4:
-                    choice_index = int(answer_lower)
-                    
-                    # First try text matching to find which button contains this value
-                    answer_text_match_found = False
-                    for i in range(4):  # Try all 4 possible answer positions
-                        try:
-                            text_selector = f"[data-functional-selector='question-choice-text-{i}']"
-                            text_element = self.driver.find_element(By.CSS_SELECTOR, text_selector)
-                            if text_element and answer_lower in text_element.text.strip().lower():
-                                # Found the element with matching text
-                                button_selector = f"[data-functional-selector='answer-{i}']"
-                                button = self.driver.find_element(By.CSS_SELECTOR, button_selector)
-                                if button.is_displayed():
-                                    button.click()
-                                    print(f"Clicked answer by text match at position {i}: {button_selector}")
+                        answer_position = self._find_answer_position(answer_lower, question.choices)
+                        if answer_position is not None:
+                            print(f"Found answer '{answer_lower}' at position {answer_position}")
+                            try:
+                                selector = f"[data-functional-selector='answer-{answer_position}']"
+                                answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                if answer_button.is_displayed():
+                                    answer_button.click()
+                                    print(f"Clicked answer at position {answer_position} using selector: {selector}")
                                     clicked = True
-                                    answer_text_match_found = True
                                     break
-                        except:
-                            continue
+                            except Exception as e:
+                                print(f"Error clicking position-based selector: {e}")
+                    except Exception as position_error:
+                        print(f"Error finding answer position: {position_error}")
                     
-                    if answer_text_match_found:
+                    if clicked:
                         break
                     
-                    # 1a: Use extracted selector if available
-                    if choice_index in answer_selectors:
-                        selector = answer_selectors[choice_index]
+                    # STRATEGY 1: Use Kahoot-specific selectors with answer index
+                    if answer_lower.isdigit() and 0 <= int(answer_lower) < 4:
                         try:
-                            if selector.startswith("//"):  # XPath
-                                answer_button = self.driver.find_element(By.XPATH, selector)
-                            else:  # CSS selector
-                                answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                                
-                            if answer_button.is_displayed():
-                                answer_button.click()
-                                print(f"Clicked answer using selector: {selector}")
-                                clicked = True
-                                break
-                        except Exception as e:
-                            pass
-                    
-                    # 1b: Try using direct answer-N selector
-                    if not clicked:
-                        try:
-                            selector = f"[data-functional-selector='answer-{choice_index}']"
-                            answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                            if answer_button.is_displayed():
-                                answer_button.click()
-                                print(f"Clicked answer using data-functional-selector: answer-{choice_index}")
-                                clicked = True
-                                break
-                        except:
-                            pass
-                        
-                    # 1c: Try using question-choice-text-N selector
-                    if not clicked:
-                        try:
-                            choice_selector = f"[data-functional-selector='question-choice-text-{choice_index}']"
-                            choice_element = self.driver.find_element(By.CSS_SELECTOR, choice_selector)
+                            choice_index = int(answer_lower)
                             
-                            if choice_element:
-                                # Try clicking element directly
+                            # First try text matching to find which button contains this value
+                            answer_text_match_found = False
+                            for i in range(4):  # Try all 4 possible answer positions
                                 try:
-                                    choice_element.click()
-                                    print(f"Clicked Kahoot choice element directly: {choice_selector}")
-                                    clicked = True
-                                    break
+                                    text_selector = f"[data-functional-selector='question-choice-text-{i}']"
+                                    text_element = self.driver.find_element(By.CSS_SELECTOR, text_selector)
+                                    if text_element and answer_lower in text_element.text.strip().lower():
+                                        # Found the element with matching text
+                                        button_selector = f"[data-functional-selector='answer-{i}']"
+                                        button = self.driver.find_element(By.CSS_SELECTOR, button_selector)
+                                        if button.is_displayed():
+                                            button.click()
+                                            print(f"Clicked answer by text match at position {i}: {button_selector}")
+                                            clicked = True
+                                            answer_text_match_found = True
+                                            break
                                 except:
-                                    # Try to find and click parent button
+                                    continue
+                            
+                            if answer_text_match_found:
+                                break
+                            
+                            # 1a: Use extracted selector if available
+                            try:
+                                if choice_index in answer_selectors:
+                                    selector = answer_selectors[choice_index]
                                     try:
-                                        parent_element = choice_element.find_element(By.XPATH, "./..")
-                                        # Keep going up until we find a button or clickable element
-                                        attempts = 0
-                                        while parent_element and attempts < 5:
-                                            try:
-                                                parent_element.click()
-                                                print(f"Clicked parent of choice element (level {attempts})")
-                                                clicked = True
-                                                break
-                                            except:
-                                                try:
-                                                    parent_element = parent_element.find_element(By.XPATH, "./..")
-                                                    attempts += 1
-                                                except:
-                                                    break
-                                    except:
+                                        if selector.startswith("//"):  # XPath
+                                            answer_button = self.driver.find_element(By.XPATH, selector)
+                                        else:  # CSS selector
+                                            answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                            
+                                        if answer_button.is_displayed():
+                                            answer_button.click()
+                                            print(f"Clicked answer using selector: {selector}")
+                                            clicked = True
+                                            break
+                                    except Exception as e:
                                         pass
-                        except:
-                            pass
-                
-                if clicked:
-                    break
-                
-                # Continue with other strategies...
-                # [rest of the method unchanged]
+                            except Exception as selector_use_error:
+                                print(f"Error using extracted selector: {selector_use_error}")
+                            
+                            # 1b: Try using direct answer-N selector
+                            if not clicked:
+                                try:
+                                    selector = f"[data-functional-selector='answer-{choice_index}']"
+                                    answer_button = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                    if answer_button.is_displayed():
+                                        answer_button.click()
+                                        print(f"Clicked answer using data-functional-selector: answer-{choice_index}")
+                                        clicked = True
+                                        break
+                                except:
+                                    pass
+                                
+                            # 1c: Try using question-choice-text-N selector
+                            if not clicked:
+                                try:
+                                    choice_selector = f"[data-functional-selector='question-choice-text-{choice_index}']"
+                                    choice_element = self.driver.find_element(By.CSS_SELECTOR, choice_selector)
+                                    
+                                    if choice_element:
+                                        # Try clicking element directly
+                                        try:
+                                            choice_element.click()
+                                            print(f"Clicked Kahoot choice element directly: {choice_selector}")
+                                            clicked = True
+                                            break
+                                        except:
+                                            # Try to find and click parent button
+                                            try:
+                                                parent_element = choice_element.find_element(By.XPATH, "./..")
+                                                # Keep going up until we find a button or clickable element
+                                                attempts = 0
+                                                while parent_element and attempts < 5:
+                                                    try:
+                                                        parent_element.click()
+                                                        print(f"Clicked parent of choice element (level {attempts})")
+                                                        clicked = True
+                                                        break
+                                                    except:
+                                                        try:
+                                                            parent_element = parent_element.find_element(By.XPATH, "./..")
+                                                            attempts += 1
+                                                        except:
+                                                            break
+                                            except:
+                                                pass
+                                except:
+                                    pass
+                        except Exception as strategy_error:
+                            print(f"Error in strategy 1: {strategy_error}")
+                    
+                    if clicked:
+                        break
+                    
+                    # Additional strategies could be added here
+                    # ...
+                    
+                except Exception as answer_error:
+                    print(f"Error processing answer '{answer}': {answer_error}")
+                    continue
             
             # Wait for the answer to register
             time.sleep(2)
@@ -794,6 +909,7 @@ class SeleniumKahootAgent:
         except Exception as e:
             print(f"Error entering answer: {e}")
             print(f"Current URL: {self.driver.current_url}")
+            # Continue despite error
             
     def _find_answer_position(self, answer_text, choices):
         """Find the position of an answer in the list of choices"""
@@ -836,74 +952,101 @@ class SeleniumKahootAgent:
             self.early_answer = None  # Store early answer here
             
             while time.time() - start_time < 120:  # Wait up to 2 minutes
-                current_url = self.driver.current_url
+                try:
+                    current_url = self.driver.current_url
+                    
+                    # Check if game is finished
+                    try:
+                        if self.is_game_finished():
+                            print("Game finished detected")
+                            return
+                    except Exception as finish_error:
+                        print(f"Error checking if game finished: {finish_error}")
+                    
+                    # Check if we're viewing answer results
+                    if "answer/result" in current_url or "/result" in current_url:
+                        print("📊 Viewing answer results - waiting for next question...")
+                        time.sleep(2)  # Check every 2 seconds
+                        continue
+                    
+                    # First check if an active question is already visible
+                    try:
+                        # If a question with answer options is already visible, return immediately
+                        if self._check_for_active_question(current_url, []):
+                            print("Full question with answer options already visible")
+                            return
+                    except Exception as active_question_error:
+                        print(f"Error checking for active question: {active_question_error}")
+                    
+                    # Check for "get ready" page - this appears before the question
+                    get_ready_indicators = [
+                        "Get ready", "get ready", "question countdown",
+                        "countdown", "loading question", "ready", "up next"
+                    ]
+                    
+                    try:
+                        page_text = self.driver.page_source.lower()
+                        page_title = self._extract_potential_question_title()
+                        
+                        # Try to prepare early answer if we're on the "get ready" page
+                        # AND no answer buttons are visible yet
+                        is_get_ready = any(indicator in page_text for indicator in get_ready_indicators)
+                        
+                        try:
+                            answer_buttons_visible = self._are_answer_buttons_visible()
+                        except Exception as buttons_error:
+                            print(f"Error checking if answer buttons visible: {buttons_error}")
+                            answer_buttons_visible = False
+                        
+                        if is_get_ready and page_title and not answer_buttons_visible:
+                            print(f"🔍 On 'get ready' page with potential question: {page_title}")
+                            try:
+                                self._prepare_early_answer(page_title)
+                            except Exception as early_answer_error:
+                                print(f"Error preparing early answer: {early_answer_error}")
+                            time.sleep(1)
+                            continue
+                        
+                        # If answer buttons are visible, we're on the actual question
+                        if answer_buttons_visible:
+                            print("Answer buttons visible - question is ready")
+                            return
+                        
+                        # Check for lobby/waiting messages (not questions)
+                        lobby_indicators = [
+                            "You're in! See your nickname on screen?",
+                            "you're in", "see your nickname",
+                            "waiting for", "get ready", "starting soon"
+                        ]
+                        
+                        is_in_lobby = any(indicator in page_text for indicator in lobby_indicators)
+                        if is_in_lobby:
+                            print("In lobby/waiting area - waiting for game to start...")
+                            time.sleep(2)
+                            continue
+                    except Exception as page_error:
+                        print(f"Error processing page content: {page_error}")
+                    
+                    # Check for question indicators one more time
+                    try:
+                        if self._check_for_active_question(current_url, lobby_indicators):
+                            time.sleep(1)  # Brief wait for content to load
+                            return
+                    except Exception as check_error:
+                        print(f"Error in final check for active question: {check_error}")
+                    
+                    time.sleep(1)  # Check more frequently
                 
-                # Check if game is finished
-                if self.is_game_finished():
-                    print("Game finished detected")
-                    return
-                
-                # Check if we're viewing answer results
-                if "answer/result" in current_url or "/result" in current_url:
-                    print("📊 Viewing answer results - waiting for next question...")
-                    time.sleep(2)  # Check every 2 seconds
-                    continue
-                
-                # First check if an active question is already visible
-                # If a question with answer options is already visible, return immediately
-                if self._check_for_active_question(current_url, []):
-                    print("Full question with answer options already visible")
-                    return
-                
-                # Check for "get ready" page - this appears before the question
-                get_ready_indicators = [
-                    "Get ready", "get ready", "question countdown",
-                    "countdown", "loading question", "ready", "up next"
-                ]
-                
-                page_text = self.driver.page_source.lower()
-                page_title = self._extract_potential_question_title()
-                
-                # Try to prepare early answer if we're on the "get ready" page
-                # AND no answer buttons are visible yet
-                is_get_ready = any(indicator in page_text for indicator in get_ready_indicators)
-                answer_buttons_visible = self._are_answer_buttons_visible()
-                
-                if is_get_ready and page_title and not answer_buttons_visible:
-                    print(f"🔍 On 'get ready' page with potential question: {page_title}")
-                    self._prepare_early_answer(page_title)
-                    time.sleep(1)
-                    continue
-                
-                # If answer buttons are visible, we're on the actual question
-                if answer_buttons_visible:
-                    print("Answer buttons visible - question is ready")
-                    return
-                
-                # Check for lobby/waiting messages (not questions)
-                lobby_indicators = [
-                    "You're in! See your nickname on screen?",
-                    "you're in", "see your nickname",
-                    "waiting for", "get ready", "starting soon"
-                ]
-                
-                is_in_lobby = any(indicator in page_text for indicator in lobby_indicators)
-                if is_in_lobby:
-                    print("In lobby/waiting area - waiting for game to start...")
-                    time.sleep(2)
-                    continue
-                
-                # Check for question indicators one more time
-                if self._check_for_active_question(current_url, lobby_indicators):
-                    time.sleep(1)  # Brief wait for content to load
-                    return
-                
-                time.sleep(1)  # Check more frequently
+                except Exception as loop_error:
+                    print(f"Error in wait_for_next_question loop: {loop_error}")
+                    time.sleep(1)  # Continue checking despite errors
             
             print("Timeout waiting for next question")
             
         except Exception as e:
             print(f"Error waiting for next question: {e}")
+            # Return to continue the game loop despite errors
+            return
     
     def _extract_potential_question_title(self):
         """Extract potential question title from current page"""
@@ -1388,7 +1531,7 @@ class SeleniumKahootAgent:
             from langchain_openai import ChatOpenAI
             
             # Use GPT-4 Vision model
-            vision_llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+            vision_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
             
             # Convert image to base64
             image_base64 = base64.b64encode(question.image_data).decode('utf-8')
